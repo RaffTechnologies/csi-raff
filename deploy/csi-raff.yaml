@@ -1,0 +1,246 @@
+# csi-raff — Raff Technologies CSI driver
+# PersistentVolumes backed by the Raff Volumes product (Ceph block devices
+# attached to worker VMs by the platform).
+#
+# The platform (k8s-service provision worker) applies this and creates the
+# `raff-csi` Secret in kube-system beforehand:
+#   data: token  = cluster-scoped raff_csi_ token
+#         apiUrl = platform base URL (e.g. https://api.rafftechnologies.com)
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi.raff.technologies
+spec:
+  attachRequired: true
+  podInfoOnMount: false
+  fsGroupPolicy: File
+  volumeLifecycleModes:
+    - Persistent
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: raff-block
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: csi.raff.technologies
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-raff-controller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: csi-raff-controller
+rules:
+  # external-provisioner
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  # external-attacher
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: csi-raff-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: csi-raff-controller
+subjects:
+  - kind: ServiceAccount
+    name: csi-raff-controller
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: csi-raff-controller
+  namespace: kube-system
+  labels:
+    app: csi-raff-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: csi-raff-controller
+  template:
+    metadata:
+      labels:
+        app: csi-raff-controller
+    spec:
+      serviceAccountName: csi-raff-controller
+      priorityClassName: system-cluster-critical
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: csi-raff
+          image: ghcr.io/rafftechnologies/csi-raff:IMAGE_TAG
+          args: ["-mode=controller", "-endpoint=unix:///csi/csi.sock"]
+          env:
+            - name: RAFF_CSI_API_URL
+              valueFrom:
+                secretKeyRef:
+                  name: raff-csi
+                  key: apiUrl
+            - name: RAFF_CSI_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: raff-csi
+                  key: token
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--timeout=180s"
+            - "--retry-interval-max=30s"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.8.0
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--timeout=180s"
+            - "--retry-interval-max=30s"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: csi-raff-node
+  namespace: kube-system
+  labels:
+    app: csi-raff-node
+spec:
+  selector:
+    matchLabels:
+      app: csi-raff-node
+  template:
+    metadata:
+      labels:
+        app: csi-raff-node
+    spec:
+      priorityClassName: system-node-critical
+      # Workers only — OneKE workers carry no role label, so select by
+      # exclusion (same convention as the SUC agent plan).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: csi-raff
+          image: ghcr.io/rafftechnologies/csi-raff:IMAGE_TAG
+          args: ["-mode=node", "-endpoint=unix:///csi/csi.sock"]
+          env:
+            - name: RAFF_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          securityContext:
+            privileged: true # mounts and formats host block devices
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
+            - name: dev-dir
+              mountPath: /dev
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+        - name: csi-node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--kubelet-registration-path=/var/lib/kubelet/plugins/csi.raff.technologies/csi.sock"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+      volumes:
+        - name: socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/csi.raff.technologies
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: dev-dir
+          hostPath:
+            path: /dev
+            type: Directory
