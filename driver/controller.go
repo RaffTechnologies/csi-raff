@@ -98,7 +98,13 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		return nil, err
 	}
 
-	vol, err := d.platform.CreateVolume(ctx, req.GetName(), sizeGB)
+	// With --extra-create-metadata the provisioner passes the claim's
+	// identity — the platform uses it for a human-readable billing name
+	// (e.g. "k7n92s-data-postgres" instead of the pvc-<uuid> handle).
+	pvcName := req.GetParameters()["csi.storage.k8s.io/pvc/name"]
+	pvcNamespace := req.GetParameters()["csi.storage.k8s.io/pvc/namespace"]
+
+	vol, err := d.platform.CreateVolume(ctx, req.GetName(), sizeGB, pvcNamespace, pvcName)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}

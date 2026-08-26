@@ -94,11 +94,14 @@ func (c *platformClient) do(ctx context.Context, method, path string, body inter
 }
 
 // CreateVolume creates (or returns, idempotently) the volume for a PV name.
-func (c *platformClient) CreateVolume(ctx context.Context, pvName string, sizeGB int) (*platformVolume, error) {
+// pvcNamespace/pvcName are optional display metadata for the billing name.
+func (c *platformClient) CreateVolume(ctx context.Context, pvName string, sizeGB int, pvcNamespace, pvcName string) (*platformVolume, error) {
 	var v platformVolume
 	err := c.do(ctx, http.MethodPost, "/volumes", map[string]interface{}{
-		"pv_name": pvName,
-		"size_gb": sizeGB,
+		"pv_name":       pvName,
+		"size_gb":       sizeGB,
+		"pvc_namespace": pvcNamespace,
+		"pvc_name":      pvcName,
 	}, &v)
 	if err != nil {
 		return nil, err
