@@ -31,6 +31,7 @@ func (d *Driver) ControllerGetCapabilities(ctx context.Context, req *csi.Control
 	caps := []csi.ControllerServiceCapability_RPC_Type{
 		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
 		csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
+		csi.ControllerServiceCapability_RPC_EXPAND_VOLUME,
 	}
 	out := make([]*csi.ControllerServiceCapability, 0, len(caps))
 	for _, c := range caps {
@@ -226,8 +227,29 @@ func (d *Driver) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsReques
 	return nil, status.Error(codes.Unimplemented, "")
 }
 
+// ControllerExpandVolume grows the backing volume (grow-only). The platform
+// requires the volume to be attached (live diskresize); a detached volume
+// returns an error and the external-resizer retries until the pod exists.
 func (d *Driver) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest) (*csi.ControllerExpandVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "resize lands in a later phase")
+	volumeID, err := strconv.Atoi(req.GetVolumeId())
+	if err != nil {
+		return nil, status.Error(codes.NotFound, "unknown volume id")
+	}
+	sizeGB, err := requestedSizeGB(req.GetCapacityRange())
+	if err != nil {
+		return nil, err
+	}
+
+	vol, err := d.platform.ExpandVolume(ctx, volumeID, sizeGB)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "%v", err)
+	}
+
+	return &csi.ControllerExpandVolumeResponse{
+		CapacityBytes: int64(vol.SizeGB) * gib,
+		// The filesystem must grow on the node (NodeExpandVolume).
+		NodeExpansionRequired: true,
+	}, nil
 }
 
 func (d *Driver) ControllerGetVolume(ctx context.Context, req *csi.ControllerGetVolumeRequest) (*csi.ControllerGetVolumeResponse, error) {

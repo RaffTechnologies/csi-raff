@@ -136,6 +136,19 @@ func (c *platformClient) AttachVolume(ctx context.Context, volumeID int, nodeIP 
 	return &a, nil
 }
 
+// ExpandVolume grows a volume in place (grow-only; requires attachment —
+// the platform rejects detached volumes and the resizer retries).
+func (c *platformClient) ExpandVolume(ctx context.Context, volumeID, newSizeGB int) (*platformVolume, error) {
+	var v platformVolume
+	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/volumes/%d/expand", volumeID), map[string]interface{}{
+		"new_size_gb": newSizeGB,
+	}, &v)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 // DetachVolume detaches a volume from its node (idempotent).
 func (c *platformClient) DetachVolume(ctx context.Context, volumeID int) error {
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/volumes/%d/detach", volumeID), nil, nil)

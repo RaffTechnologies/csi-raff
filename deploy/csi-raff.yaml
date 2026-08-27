@@ -26,7 +26,7 @@ metadata:
 provisioner: csi.raff.technologies
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
-allowVolumeExpansion: false
+allowVolumeExpansion: true
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -46,6 +46,10 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "update"]
+  # external-resizer
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["patch", "update"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
     verbs: ["get", "list", "watch"]
@@ -135,6 +139,21 @@ spec:
             # Pass PVC name/namespace to CreateVolume — used for the
             # human-readable billing name of the backing Volume.
             - "--extra-create-metadata"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+        - name: csi-resizer
+          image: registry.k8s.io/sig-storage/csi-resizer:v1.13.1
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--timeout=180s"
+            - "--retry-interval-max=30s"
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

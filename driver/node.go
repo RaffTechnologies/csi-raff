@@ -47,6 +47,13 @@ func (d *Driver) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabi
 					},
 				},
 			},
+			{
+				Type: &csi.NodeServiceCapability_Rpc{
+					Rpc: &csi.NodeServiceCapability_RPC{
+						Type: csi.NodeServiceCapability_RPC_EXPAND_VOLUME,
+					},
+				},
+			},
 		},
 	}, nil
 }
@@ -157,8 +164,23 @@ func (d *Driver) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVolumeS
 	return nil, status.Error(codes.Unimplemented, "")
 }
 
+// NodeExpandVolume grows the filesystem to fill the expanded block device.
 func (d *Driver) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "resize lands in a later phase")
+	volumePath := req.GetVolumePath()
+	if volumePath == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume path is required")
+	}
+
+	mounter := mount.New("")
+	device, _, err := mount.GetDeviceNameFromMount(mounter, volumePath)
+	if err != nil || device == "" {
+		return nil, status.Errorf(codes.Internal, "failed to find device for %s: %v", volumePath, err)
+	}
+
+	if _, err := mount.NewResizeFs(utilexec.New()).Resize(device, volumePath); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to grow filesystem on %s: %v", device, err)
+	}
+	return &csi.NodeExpandVolumeResponse{}, nil
 }
 
 // waitForDevice polls until the hotplugged block device node exists.
